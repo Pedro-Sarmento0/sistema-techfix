@@ -11,7 +11,7 @@ export type AuditEntry = {
   snapshot?: unknown;
 };
 
-const DB_NAME = 'techfix-operational-database';
+const DB_NAME = import.meta.env.VITE_DB_NAME || 'techfix-operational-database';
 const DB_VERSION = 1;
 
 let connection: Promise<IDBDatabase> | null = null;
