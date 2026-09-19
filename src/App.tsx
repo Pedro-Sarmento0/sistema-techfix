@@ -31,8 +31,8 @@ import {
   X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import type { AuditEntry } from './database';
-import { deleteRecord, getAllRecords, getRecord, putRecord, writeAudit } from './database';
+import type { Admin, AuditEntry } from './api';
+import * as api from './api';
 
 type Page = 'dashboard' | 'clientes' | 'atendimentos' | 'agenda' | 'financeiro' | 'alteracoes' | 'configuracoes';
 type Plan = 'Básico' | 'Premium';
@@ -68,15 +68,6 @@ type Ticket = {
   createdAt: string;
   updatedAt: string;
 };
-type Admin = { id: 'main'; name: string; email: string; password: string };
-
-const keys = {
-  admin: 'techfix-admin',
-  session: 'techfix-session',
-  clients: 'techfix-clients',
-  tickets: 'techfix-tickets',
-};
-
 const plans: Record<Plan, { price: number; devices: number }> = {
   Básico: { price: 39.9, devices: 1 },
   Premium: { price: 79.9, devices: 3 },
@@ -92,15 +83,6 @@ const dateInputValue = (date: Date) => {
 };
 const todayInput = () => dateInputValue(new Date());
 const createId = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
-
-function readLegacy<T>(key: string, fallback: T): T {
-  try {
-    const value = localStorage.getItem(key);
-    return value ? (JSON.parse(value) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
 
 function parseLocalDate(value: string) {
   if (!value) return null;
@@ -143,15 +125,6 @@ function statusClass(value: string) {
 
 function sortAudit(entries: AuditEntry[]) {
   return [...entries].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-}
-
-function normalizeAdmin(value: Partial<Admin>): Admin {
-  return {
-    id: 'main',
-    name: value.name?.trim() || 'Administrador',
-    email: value.email?.trim() || '',
-    password: value.password || '',
-  };
 }
 
 function normalizeClient(value: Partial<Client>): Client {
@@ -245,38 +218,43 @@ function Splash() {
   return (
     <main className="splash">
       <div className="brand-mark">TF</div>
-      <strong>Carregando banco de dados</strong>
+      <strong>Conectando ao servidor</strong>
       <span>Preparando clientes, chamados e histórico.</span>
     </main>
   );
 }
 
-function Login({ storedAdmin, onLogin }: { storedAdmin: Admin | null; onLogin: (admin: Admin, isNew: boolean) => Promise<void> }) {
+function Login({ hasAdmin, onLogin }: { hasAdmin: boolean; onLogin: (value: { name: string; email: string; password: string }, isNew: boolean) => Promise<void> }) {
   const [form, setForm] = useState({ name: '', email: '', password: '' });
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
-  const hasAdmin = Boolean(storedAdmin);
-
   async function submit(event: FormEvent) {
     event.preventDefault();
     setError('');
 
     if (!form.email.includes('@')) return setError('Informe um e-mail válido.');
-    if (form.password.length < 6) return setError('A senha precisa ter pelo menos 6 caracteres.');
+    if (form.password.length < 12) return setError('A senha precisa ter pelo menos 12 caracteres.');
 
     if (hasAdmin) {
-      if (!storedAdmin || storedAdmin.email !== form.email.trim() || storedAdmin.password !== form.password) {
-        return setError('E-mail ou senha incorretos.');
-      }
       setSaving(true);
-      await onLogin(storedAdmin, false);
+      try {
+        await onLogin(form, false);
+      } catch (error) {
+        setSaving(false);
+        setError(error instanceof Error ? error.message : 'Não foi possível entrar.');
+      }
       return;
     }
 
     if (!form.name.trim()) return setError('Informe seu nome.');
 
     setSaving(true);
-    await onLogin(normalizeAdmin({ name: form.name, email: form.email, password: form.password }), true);
+    try {
+      await onLogin(form, true);
+    } catch (error) {
+      setSaving(false);
+      setError(error instanceof Error ? error.message : 'Não foi possível criar o acesso.');
+    }
   }
 
   return (
@@ -288,7 +266,7 @@ function Login({ storedAdmin, onLogin }: { storedAdmin: Admin | null; onLogin: (
         <p className="login-copy">Clientes, chamados, agenda, financeiro e histórico em um painel direto para operar todos os dias.</p>
         <div className="login-art-footer">
           <Database size={16} />
-          Banco local IndexedDB ativo
+          API protegida e dados no servidor
         </div>
       </section>
       <section className="login-panel">
@@ -309,7 +287,7 @@ function Login({ storedAdmin, onLogin }: { storedAdmin: Admin | null; onLogin: (
             </label>
             <label>
               Senha
-              <input required type="password" value={form.password} onChange={event => setForm({ ...form, password: event.target.value })} placeholder="Mínimo de 6 caracteres" />
+              <input required type="password" value={form.password} onChange={event => setForm({ ...form, password: event.target.value })} placeholder="Mínimo de 12 caracteres" />
             </label>
             {error && (
               <div className="form-error">
@@ -322,7 +300,7 @@ function Login({ storedAdmin, onLogin }: { storedAdmin: Admin | null; onLogin: (
               <ArrowRight size={17} />
             </button>
           </form>
-          <small>As alterações ficam gravadas neste navegador e aparecem no histórico.</small>
+          <small>Os dados ficam protegidos no servidor e aparecem no histórico.</small>
         </div>
       </section>
     </main>
@@ -332,8 +310,8 @@ function Login({ storedAdmin, onLogin }: { storedAdmin: Admin | null; onLogin: (
 function App() {
   const [booting, setBooting] = useState(true);
   const [bootError, setBootError] = useState('');
-  const [storedAdmin, setStoredAdmin] = useState<Admin | null>(null);
   const [admin, setAdmin] = useState<Admin | null>(null);
+  const [hasAdmin, setHasAdmin] = useState(false);
   const [page, setPage] = useState<Page>('dashboard');
   const [clients, setClients] = useState<Client[]>([]);
   const [tickets, setTickets] = useState<Ticket[]>([]);
@@ -343,64 +321,18 @@ function App() {
   useEffect(() => {
     async function boot() {
       try {
-        let savedAdmin = (await getRecord<Admin>('admin', 'main')) ?? null;
-        let savedClients = (await getAllRecords<Client>('clients')).map(normalizeClient);
-        let savedTickets = (await getAllRecords<Ticket>('tickets')).map(ticket => normalizeTicket(ticket, savedClients));
-
-        const legacyAdmin = readLegacy<Partial<Admin> | null>(keys.admin, null);
-        if (!savedAdmin && legacyAdmin) {
-          savedAdmin = normalizeAdmin(legacyAdmin);
-          await putRecord('admin', savedAdmin);
-          await writeAudit({
-            entity: 'system',
-            action: 'migrate',
-            title: 'Administrador migrado',
-            description: 'Dados antigos do localStorage foram importados para o banco local.',
-            actor: 'Sistema',
-          });
+        const status = await api.getAuthStatus();
+        setHasAdmin(status.hasAdmin);
+        if (status.hasAdmin) {
+          const saved = await api.getBootstrap<Client | Ticket>();
+          setAdmin(saved.admin);
+          setClients(saved.clients as Client[]);
+          setTickets(saved.tickets as Ticket[]);
+          setAudit(sortAudit(saved.audit));
         }
-
-        if (!savedClients.length) {
-          const legacyClients = readLegacy<Partial<Client>[]>(keys.clients, []);
-          if (legacyClients.length) {
-            savedClients = legacyClients.map(normalizeClient);
-            await Promise.all(savedClients.map(client => putRecord('clients', client)));
-            await writeAudit({
-              entity: 'system',
-              action: 'migrate',
-              title: 'Clientes migrados',
-              description: `${savedClients.length} cliente(s) importado(s) para o banco local.`,
-              actor: 'Sistema',
-            });
-          }
-        }
-
-        if (!savedTickets.length) {
-          const legacyTickets = readLegacy<Partial<Ticket>[]>(keys.tickets, []);
-          if (legacyTickets.length) {
-            savedTickets = legacyTickets.map(ticket => normalizeTicket(ticket, savedClients));
-            await Promise.all(savedTickets.map(ticket => putRecord('tickets', ticket)));
-            await writeAudit({
-              entity: 'system',
-              action: 'migrate',
-              title: 'Atendimentos migrados',
-              description: `${savedTickets.length} atendimento(s) importado(s) para o banco local.`,
-              actor: 'Sistema',
-            });
-          }
-        }
-
-        const savedAudit = await getAllRecords<AuditEntry>('audit');
-        const sessionActive = Boolean(localStorage.getItem(keys.session));
-
-        setStoredAdmin(savedAdmin);
-        setAdmin(sessionActive && savedAdmin ? savedAdmin : null);
-        setClients(savedClients.sort((a, b) => a.name.localeCompare(b.name)));
-        setTickets(savedTickets.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
-        setAudit(sortAudit(savedAudit));
       } catch (error) {
         console.error(error);
-        setBootError('Não foi possível abrir o banco de dados local do navegador.');
+        setBootError('Não foi possível conectar ao servidor.');
       } finally {
         setBooting(false);
       }
@@ -409,38 +341,18 @@ function App() {
     void boot();
   }, []);
 
-  async function recordAudit(entry: Omit<AuditEntry, 'id' | 'createdAt' | 'actor'> & { actor?: string }) {
-    const saved = await writeAudit({
-      ...entry,
-      actor: entry.actor ?? admin?.name ?? storedAdmin?.name ?? 'Sistema',
-    });
-    setAudit(previous => sortAudit([saved, ...previous]));
-    return saved;
-  }
-
-  async function handleLogin(value: Admin, isNew: boolean) {
-    if (isNew) await putRecord('admin', value);
-    localStorage.setItem(keys.session, 'active');
-    setStoredAdmin(value);
-    setAdmin(value);
-    const saved = await writeAudit({
-      entity: 'admin',
-      action: isNew ? 'create' : 'login',
-      title: isNew ? 'Acesso administrativo criado' : 'Login realizado',
-      description: isNew ? 'Primeiro usuário administrativo cadastrado.' : 'Administrador entrou no painel.',
-      actor: value.name,
-    });
-    setAudit(previous => sortAudit([saved, ...previous]));
+  async function handleLogin(value: { name: string; email: string; password: string }, isNew: boolean) {
+    const result = isNew ? await api.register(value.name, value.email, value.password) : await api.login(value.email, value.password);
+    setAdmin(result.admin);
+    setHasAdmin(true);
+    const saved = await api.getBootstrap<Client | Ticket>();
+    setClients(saved.clients as Client[]);
+    setTickets(saved.tickets as Ticket[]);
+    setAudit(sortAudit(saved.audit));
   }
 
   async function logout() {
-    localStorage.removeItem(keys.session);
-    await recordAudit({
-      entity: 'admin',
-      action: 'logout',
-      title: 'Sessão encerrada',
-      description: 'Administrador saiu do painel.',
-    });
+    await api.logout();
     setAdmin(null);
   }
 
@@ -454,31 +366,19 @@ function App() {
       updatedAt: now,
     });
 
-    await putRecord('clients', saved);
+    const result = await api.saveClient(saved);
     setClients(previous => {
       const next = exists ? previous.map(item => (item.id === saved.id ? saved : item)) : [...previous, saved];
       return next.sort((a, b) => a.name.localeCompare(b.name));
     });
-    await recordAudit({
-      entity: 'client',
-      action: exists ? 'update' : 'create',
-      title: saved.name,
-      description: exists ? 'Cadastro do cliente atualizado.' : 'Novo cliente cadastrado.',
-      snapshot: saved,
-    });
+    setAudit(previous => sortAudit([result.audit, ...previous]));
   }
 
   async function deleteClient(client: Client) {
     if (!window.confirm(`Excluir o cliente ${client.name}? Os atendimentos antigos continuarão no histórico.`)) return;
-    await deleteRecord('clients', client.id);
+    const result = await api.deleteClient(client.id);
     setClients(previous => previous.filter(item => item.id !== client.id));
-    await recordAudit({
-      entity: 'client',
-      action: 'delete',
-      title: client.name,
-      description: 'Cliente removido da carteira.',
-      snapshot: client,
-    });
+    setAudit(previous => sortAudit([result.audit, ...previous]));
   }
 
   async function saveTicket(ticket: Ticket) {
@@ -495,31 +395,19 @@ function App() {
       clients,
     );
 
-    await putRecord('tickets', saved);
+    const result = await api.saveTicket(saved);
     setTickets(previous => {
       const next = exists ? previous.map(item => (item.id === saved.id ? saved : item)) : [...previous, saved];
       return next.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     });
-    await recordAudit({
-      entity: 'ticket',
-      action: exists ? 'update' : 'create',
-      title: saved.id,
-      description: exists ? `Atendimento de ${saved.client} atualizado.` : `Atendimento aberto para ${saved.client}.`,
-      snapshot: saved,
-    });
+    setAudit(previous => sortAudit([result.audit, ...previous]));
   }
 
   async function deleteTicket(ticket: Ticket) {
     if (!window.confirm(`Excluir o atendimento ${ticket.id}?`)) return;
-    await deleteRecord('tickets', ticket.id);
+    const result = await api.deleteTicket(ticket.id);
     setTickets(previous => previous.filter(item => item.id !== ticket.id));
-    await recordAudit({
-      entity: 'ticket',
-      action: 'delete',
-      title: ticket.id,
-      description: `Atendimento de ${ticket.client} removido.`,
-      snapshot: ticket,
-    });
+    setAudit(previous => sortAudit([result.audit, ...previous]));
   }
 
   async function markClientPaid(client: Client) {
@@ -531,13 +419,7 @@ function App() {
   }
 
   async function exportBackup() {
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      admin: admin ? { name: admin.name, email: admin.email } : null,
-      clients,
-      tickets,
-      audit,
-    };
+    const payload = await api.getBackup();
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -545,12 +427,7 @@ function App() {
     link.download = `techfix-backup-${todayInput()}.json`;
     link.click();
     URL.revokeObjectURL(url);
-    await recordAudit({
-      entity: 'system',
-      action: 'backup',
-      title: 'Backup exportado',
-      description: 'Arquivo JSON gerado com clientes, atendimentos e histórico.',
-    });
+    setAudit(sortAudit(payload.audit));
   }
 
   if (booting) return <Splash />;
@@ -565,7 +442,7 @@ function App() {
     );
   }
 
-  if (!admin) return <Login storedAdmin={storedAdmin} onLogin={handleLogin} />;
+  if (!admin) return <Login hasAdmin={hasAdmin} onLogin={handleLogin} />;
 
   const nav: [Page, LucideIcon, string][] = [
     ['dashboard', LayoutDashboard, 'Dashboard'],
@@ -588,9 +465,9 @@ function App() {
             Techfix <span>Informática</span>
           </strong>
         </div>
-        <div className="db-chip" title="Banco local do navegador">
+        <div className="db-chip" title="Banco protegido no servidor">
           <Database size={15} />
-          Dados salvos
+          Servidor protegido
         </div>
         <div className="top-user">
           <UserRound size={16} />
@@ -658,7 +535,7 @@ function Dashboard({ clients, tickets, audit, onNavigate }: { clients: Client[];
       <Header
         eyebrow="VISÃO GERAL"
         title="Dashboard"
-        subtitle="Resumo operacional com dados salvos no banco local."
+        subtitle="Resumo operacional com dados protegidos no servidor."
         action={
           <button className="primary" onClick={() => onNavigate('clientes')}>
             <Plus size={17} />
@@ -1470,7 +1347,7 @@ function SettingsPage({ admin, clients, tickets, audit, onBackup }: { admin: Adm
       <Header
         eyebrow="SISTEMA"
         title="Configurações"
-        subtitle="Dados do acesso, banco local e backup."
+        subtitle="Dados do acesso, banco protegido e backup."
         action={
           <button className="primary" onClick={() => void onBackup()}>
             <Download size={17} />
@@ -1485,7 +1362,7 @@ function SettingsPage({ admin, clients, tickets, audit, onBackup }: { admin: Adm
           </div>
           <div>
             <h3>Acesso administrativo</h3>
-            <p>O painel está protegido pelo acesso criado neste navegador.</p>
+            <p>O painel está protegido por sessão autenticada no servidor.</p>
           </div>
           <div className="settings-line">
             <span>Nome</span>
@@ -1497,7 +1374,7 @@ function SettingsPage({ admin, clients, tickets, audit, onBackup }: { admin: Adm
           </div>
           <div className="settings-line">
             <span>Senha</span>
-            <strong>Armazenada localmente</strong>
+            <strong>Hash protegido no servidor</strong>
           </div>
         </div>
 
@@ -1507,7 +1384,7 @@ function SettingsPage({ admin, clients, tickets, audit, onBackup }: { admin: Adm
           </div>
           <div>
             <h3>Banco de dados</h3>
-            <p>Persistência feita com IndexedDB, mantendo os registros mesmo ao fechar o navegador.</p>
+            <p>Persistência feita no servidor, com autorização em cada operação.</p>
           </div>
           <div className="settings-line">
             <span>Clientes</span>
