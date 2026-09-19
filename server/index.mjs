@@ -6,7 +6,7 @@ import express from 'express';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const dataDir = path.join(root, 'data');
-const dataFile = process.env.TECHFIX_DATA_FILE || path.join(dataDir, 'techfix.json');
+const dataFile = process.env.TECHFIX_DATA_FILE || (process.env.VERCEL ? '/tmp/techfix.json' : path.join(dataDir, 'techfix.json'));
 const port = Number(process.env.PORT || 3000);
 const isProduction = process.env.NODE_ENV === 'production' || process.argv.includes('--production');
 const sessionTtlMs = 8 * 60 * 60 * 1000;
@@ -28,7 +28,7 @@ async function loadData() {
 }
 
 async function persist() {
-  await fs.mkdir(dataDir, { recursive: true });
+  await fs.mkdir(path.dirname(dataFile), { recursive: true });
   const temporary = `${dataFile}.tmp`;
   await fs.writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
   await fs.rename(temporary, dataFile);
@@ -226,4 +226,9 @@ if (isProduction) {
 }
 
 await loadData();
-app.listen(port, () => console.log(`Techfix server listening on http://localhost:${port}`));
+
+export default app;
+
+if (!process.env.VERCEL) {
+  app.listen(port, () => console.log(`Techfix server listening on http://localhost:${port}`));
+}

@@ -20,3 +20,9 @@ npm start
 ```
 
 O servidor serve o build, exige sessão em cookie `HttpOnly`, aplica expiração e limite de tentativas, armazena apenas hash `scrypt` das senhas e valida as operações no backend. Publique atrás de HTTPS para habilitar o atributo `Secure` do cookie e o HSTS.
+
+## Vercel
+
+Importe este repositório na Vercel. O arquivo `vercel.json` publica o build Vite e encaminha `/api/*` para a função em `api/index.mjs`. Configure `NODE_ENV=production` nas variáveis do projeto.
+
+O armazenamento em `/tmp` da função é temporário e não serve para dados reais: para produção, substitua `data/techfix.json` por PostgreSQL/MySQL gerenciado e armazene as sessões no banco ou em Redis.
