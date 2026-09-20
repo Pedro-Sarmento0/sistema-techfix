@@ -312,6 +312,7 @@ function App() {
   const [bootError, setBootError] = useState('');
   const [admin, setAdmin] = useState<Admin | null>(null);
   const [hasAdmin, setHasAdmin] = useState(false);
+  const [users, setUsers] = useState<Admin[]>([]);
   const [page, setPage] = useState<Page>('dashboard');
   const [clients, setClients] = useState<Client[]>([]);
   const [tickets, setTickets] = useState<Ticket[]>([]);
@@ -326,6 +327,7 @@ function App() {
         if (status.hasAdmin) {
           const saved = await api.getBootstrap<Client | Ticket>();
           setAdmin(saved.admin);
+          setUsers(saved.users);
           setClients(saved.clients as Client[]);
           setTickets(saved.tickets as Ticket[]);
           setAudit(sortAudit(saved.audit));
@@ -346,6 +348,7 @@ function App() {
     setAdmin(result.admin);
     setHasAdmin(true);
     const saved = await api.getBootstrap<Client | Ticket>();
+    setUsers(saved.users);
     setClients(saved.clients as Client[]);
     setTickets(saved.tickets as Ticket[]);
     setAudit(sortAudit(saved.audit));
@@ -354,6 +357,12 @@ function App() {
   async function logout() {
     await api.logout();
     setAdmin(null);
+  }
+
+  async function createUser(value: { name: string; email: string; password: string; role: Admin['role'] }) {
+    const result = await api.createUser(value.name, value.email, value.password, value.role);
+    setUsers(previous => [...previous, result.user].sort((left, right) => left.name.localeCompare(right.name)));
+    setAudit(previous => sortAudit([result.audit, ...previous]));
   }
 
   async function saveClient(client: Client) {
@@ -514,7 +523,7 @@ function App() {
         {page === 'agenda' && <Agenda tickets={tickets} onEdit={saveTicket} clients={clients} />}
         {page === 'financeiro' && <Finance clients={clients} tickets={tickets} onMarkPaid={markClientPaid} onSaveClient={saveClient} />}
         {page === 'alteracoes' && <Changes audit={audit} />}
-        {page === 'configuracoes' && <SettingsPage admin={admin} clients={clients} tickets={tickets} audit={audit} onBackup={exportBackup} />}
+        {page === 'configuracoes' && <SettingsPage admin={admin} users={users} clients={clients} tickets={tickets} audit={audit} onBackup={exportBackup} onCreateUser={createUser} />}
       </main>
     </div>
   );
@@ -1341,7 +1350,26 @@ function Changes({ audit }: { audit: AuditEntry[] }) {
   );
 }
 
-function SettingsPage({ admin, clients, tickets, audit, onBackup }: { admin: Admin; clients: Client[]; tickets: Ticket[]; audit: AuditEntry[]; onBackup: () => Promise<void> }) {
+function SettingsPage({ admin, users, clients, tickets, audit, onBackup, onCreateUser }: { admin: Admin; users: Admin[]; clients: Client[]; tickets: Ticket[]; audit: AuditEntry[]; onBackup: () => Promise<void>; onCreateUser: (value: { name: string; email: string; password: string; role: Admin['role'] }) => Promise<void> }) {
+  const [form, setForm] = useState({ name: '', email: '', password: '', role: 'operator' as Admin['role'] });
+  const [savingUser, setSavingUser] = useState(false);
+  const [userError, setUserError] = useState('');
+
+  async function submitUser(event: FormEvent) {
+    event.preventDefault();
+    setUserError('');
+    if (form.password.length < 12) return setUserError('A senha precisa ter pelo menos 12 caracteres.');
+    setSavingUser(true);
+    try {
+      await onCreateUser(form);
+      setForm({ name: '', email: '', password: '', role: 'operator' });
+    } catch (error) {
+      setUserError(error instanceof Error ? error.message : 'Não foi possível criar o usuário.');
+    } finally {
+      setSavingUser(false);
+    }
+  }
+
   return (
     <>
       <Header
@@ -1376,7 +1404,57 @@ function SettingsPage({ admin, clients, tickets, audit, onBackup }: { admin: Adm
             <span>Senha</span>
             <strong>Hash protegido no servidor</strong>
           </div>
+          <div className="settings-line">
+            <span>Perfil</span>
+            <strong>{admin.role === 'admin' ? 'Administrador' : 'Operador'}</strong>
+          </div>
         </div>
+
+        {admin.role === 'admin' && (
+          <div className="panel settings-panel">
+            <div className="settings-icon">
+              <Users size={21} />
+            </div>
+            <div>
+              <h3>Usuários do sistema</h3>
+              <p>Crie acessos individuais. As senhas são armazenadas somente como hash.</p>
+            </div>
+            <form onSubmit={submitUser} className="form-grid">
+              <label>
+                Nome
+                <input required value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} />
+              </label>
+              <label>
+                E-mail
+                <input required type="email" value={form.email} onChange={event => setForm({ ...form, email: event.target.value })} />
+              </label>
+              <label>
+                Senha
+                <input required type="password" minLength={12} value={form.password} onChange={event => setForm({ ...form, password: event.target.value })} />
+              </label>
+              <label>
+                Perfil
+                <select value={form.role} onChange={event => setForm({ ...form, role: event.target.value as Admin['role'] })}>
+                  <option value="operator">Operador</option>
+                  <option value="admin">Administrador</option>
+                </select>
+              </label>
+              {userError && <div className="form-error full-field"><AlertCircle size={16} />{userError}</div>}
+              <button className="primary" disabled={savingUser}>
+                <Plus size={17} />
+                {savingUser ? 'Criando...' : 'Criar usuário'}
+              </button>
+            </form>
+            <div className="user-list">
+              {users.map(user => (
+                <div className="settings-line" key={user.id}>
+                  <span>{user.name}<small>{user.email}</small></span>
+                  <strong>{user.role === 'admin' ? 'Administrador' : 'Operador'}</strong>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="panel settings-panel">
           <div className="settings-icon database">

@@ -20,7 +20,16 @@ const pool = process.env.DATABASE_URL
   : null;
 let data;
 
-const emptyData = () => ({ admin: null, clients: [], tickets: [], audit: [] });
+const emptyData = () => ({ users: [], clients: [], tickets: [], audit: [] });
+
+function normalizeData(value) {
+  const normalized = { ...emptyData(), ...value };
+  if (!normalized.users.length && normalized.admin) {
+    normalized.users = [{ ...normalized.admin, role: 'admin' }];
+  }
+  delete normalized.admin;
+  return normalized;
+}
 
 async function loadData() {
   if (pool) {
@@ -37,7 +46,7 @@ async function loadData() {
       );
     `);
     const result = await pool.query('SELECT payload FROM techfix_state WHERE id = 1');
-    data = result.rows[0]?.payload ?? emptyData();
+    data = normalizeData(result.rows[0]?.payload ?? emptyData());
     if (!result.rows[0]) await persist();
     return;
   }
@@ -48,7 +57,7 @@ async function loadData() {
     data = emptyData();
     await persist();
   }
-  data = { ...emptyData(), ...data };
+  data = normalizeData(data);
 }
 
 async function persist() {
@@ -69,7 +78,7 @@ async function persist() {
 const id = () => crypto.randomUUID();
 const now = () => new Date().toISOString();
 const text = (value, max = 500) => (typeof value === 'string' ? value.trim().slice(0, max) : '');
-const publicAdmin = admin => (admin ? { id: admin.id, name: admin.name, email: admin.email } : null);
+const publicUser = user => (user ? { id: user.id, name: user.name, email: user.email, role: user.role } : null);
 const sessionHash = token => crypto.createHash('sha256').update(token).digest('hex');
 
 async function saveSession(token, adminId) {
@@ -174,13 +183,13 @@ async function requireAuth(req, res, next) {
     if (token) await deleteSession(token);
     return fail(res, 401, 'Sessão inválida ou expirada.');
   }
-  req.admin = data.admin?.id === session.adminId ? data.admin : null;
-  if (!req.admin) return fail(res, 401, 'Sessão inválida ou expirada.');
+  req.user = data.users.find(user => user.id === session.adminId) ?? null;
+  if (!req.user) return fail(res, 401, 'Sessão inválida ou expirada.');
   next();
 }
 
 function audit(req, action, entity, title, description, snapshot) {
-  const entry = { id: id(), entity, action, title, description, actor: req.admin.name, createdAt: now() };
+  const entry = { id: id(), entity, action, title, description, actor: req.user.name, createdAt: now() };
   if (snapshot !== undefined) entry.snapshot = snapshot;
   data.audit.unshift(entry);
   return entry;
@@ -199,32 +208,34 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: '100kb' }));
 
-app.get('/api/bootstrap', requireAuth, (req, res) => res.json({ admin: publicAdmin(req.admin), clients: data.clients, tickets: data.tickets, audit: data.audit }));
-app.get('/api/auth/status', (req, res) => res.json({ hasAdmin: Boolean(data.admin) }));
+app.get('/api/bootstrap', requireAuth, (req, res) => res.json({ admin: publicUser(req.user), users: data.users.map(publicUser), clients: data.clients, tickets: data.tickets, audit: data.audit }));
+app.get('/api/auth/status', (req, res) => res.json({ hasAdmin: data.users.length > 0 }));
 app.post('/api/auth/register', rateLimit, async (req, res) => {
-  if (data.admin) return fail(res, 409, 'O acesso administrativo já foi criado.');
+  if (data.users.length) return fail(res, 409, 'O acesso inicial já foi criado. Entre para criar novos usuários.');
   const name = text(req.body?.name, 160);
   const email = text(req.body?.email, 240).toLowerCase();
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
   if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 12) return fail(res, 400, 'Nome, e-mail válido e senha com pelo menos 12 caracteres são obrigatórios.');
-  data.admin = { id: 'main', name, email, passwordHash: hashPassword(password), createdAt: now() };
+  const user = { id: id(), name, email, passwordHash: hashPassword(password), role: 'admin', createdAt: now() };
+  data.users.push(user);
   const token = id();
-  await saveSession(token, data.admin.id);
-  audit({ admin: data.admin }, 'create', 'admin', 'Acesso administrativo criado', 'Primeiro usuário administrativo cadastrado.');
+  await saveSession(token, user.id);
+  audit({ user }, 'create', 'admin', 'Acesso administrativo criado', 'Primeiro usuário administrativo cadastrado.');
   await persist();
   res.setHeader('Set-Cookie', sessionCookie(token));
-  res.status(201).json({ admin: publicAdmin(data.admin) });
+  res.status(201).json({ admin: publicUser(user) });
 });
 app.post('/api/auth/login', rateLimit, async (req, res) => {
   const email = text(req.body?.email, 240).toLowerCase();
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
-  if (!data.admin || data.admin.email !== email || !verifyPassword(password, data.admin.passwordHash)) return fail(res, 401, 'E-mail ou senha incorretos.');
+  const user = data.users.find(item => item.email === email);
+  if (!user || !verifyPassword(password, user.passwordHash)) return fail(res, 401, 'E-mail ou senha incorretos.');
   const token = id();
-  await saveSession(token, data.admin.id);
-  audit({ admin: data.admin }, 'login', 'admin', 'Login realizado', 'Administrador entrou no painel.');
+  await saveSession(token, user.id);
+  audit({ user }, 'login', 'admin', 'Login realizado', 'Usuário entrou no painel.');
   await persist();
   res.setHeader('Set-Cookie', sessionCookie(token));
-  res.json({ admin: publicAdmin(data.admin) });
+  res.json({ admin: publicUser(user) });
 });
 app.post('/api/auth/logout', requireAuth, async (req, res) => {
   const token = req.headers.cookie?.match(/(?:^|; )techfix_session=([^;]+)/)?.[1];
@@ -233,6 +244,21 @@ app.post('/api/auth/logout', requireAuth, async (req, res) => {
   await persist();
   res.setHeader('Set-Cookie', 'techfix_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict');
   res.status(204).end();
+});
+
+app.post('/api/users', requireAuth, async (req, res) => {
+  if (req.user.role !== 'admin') return fail(res, 403, 'Somente administradores podem criar usuários.');
+  const name = text(req.body?.name, 160);
+  const email = text(req.body?.email, 240).toLowerCase();
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const role = req.body?.role === 'admin' ? 'admin' : 'operator';
+  if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 12) return fail(res, 400, 'Nome, e-mail válido e senha com pelo menos 12 caracteres são obrigatórios.');
+  if (data.users.some(user => user.email === email)) return fail(res, 409, 'Este e-mail já está cadastrado.');
+  const user = { id: id(), name, email, passwordHash: hashPassword(password), role, createdAt: now() };
+  data.users.push(user);
+  const entry = audit(req, 'create', 'admin', user.name, `Usuário ${role === 'admin' ? 'administrador' : 'operador'} criado.`, { id: user.id, name, email, role });
+  await persist();
+  res.status(201).json({ user: publicUser(user), audit: entry });
 });
 
 app.put('/api/clients/:id', requireAuth, async (req, res) => {
@@ -276,7 +302,7 @@ app.delete('/api/tickets/:id', requireAuth, async (req, res) => {
 app.get('/api/backup', requireAuth, async (req, res) => {
   audit(req, 'backup', 'system', 'Backup exportado', 'Arquivo JSON gerado com clientes, atendimentos e histórico.');
   await persist();
-  res.json({ exportedAt: now(), admin: publicAdmin(req.admin), clients: data.clients, tickets: data.tickets, audit: data.audit });
+  res.json({ exportedAt: now(), admin: publicUser(req.user), clients: data.clients, tickets: data.tickets, audit: data.audit });
 });
 
 if (isProduction) {

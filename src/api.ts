@@ -9,7 +9,7 @@ export type AuditEntry = {
   snapshot?: unknown;
 };
 
-export type Admin = { id: 'main'; name: string; email: string };
+export type Admin = { id: string; name: string; email: string; role: 'admin' | 'operator' };
 export type ApiRecordResponse<T> = { record: T; audit: AuditEntry };
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -26,7 +26,7 @@ export function getAuthStatus() {
 }
 
 export function getBootstrap<T>() {
-  return request<{ admin: Admin; clients: T[]; tickets: T[]; audit: AuditEntry[] }>('/api/bootstrap');
+  return request<{ admin: Admin; users: Admin[]; clients: T[]; tickets: T[]; audit: AuditEntry[] }>('/api/bootstrap');
 }
 
 export function register(name: string, email: string, password: string) {
@@ -59,4 +59,8 @@ export function deleteTicket(id: string) {
 
 export function getBackup() {
   return request<{ exportedAt: string; admin: Admin; clients: unknown[]; tickets: unknown[]; audit: AuditEntry[] }>('/api/backup');
+}
+
+export function createUser(name: string, email: string, password: string, role: Admin['role']) {
+  return request<{ user: Admin; audit: AuditEntry }>('/api/users', { method: 'POST', body: JSON.stringify({ name, email, password, role }) });
 }
