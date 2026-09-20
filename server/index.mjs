@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
+import pg from 'pg';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const dataDir = path.join(root, 'data');
@@ -10,13 +11,36 @@ const dataFile = process.env.TECHFIX_DATA_FILE || (process.env.VERCEL ? '/tmp/te
 const port = Number(process.env.PORT || 3000);
 const isProduction = process.env.NODE_ENV === 'production' || process.argv.includes('--production');
 const sessionTtlMs = 8 * 60 * 60 * 1000;
-const sessions = new Map();
 const attempts = new Map();
+const pool = process.env.DATABASE_URL
+  ? new pg.Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+    })
+  : null;
 let data;
 
 const emptyData = () => ({ admin: null, clients: [], tickets: [], audit: [] });
 
 async function loadData() {
+  if (pool) {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS techfix_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        payload JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS techfix_sessions (
+        token_hash CHAR(64) PRIMARY KEY,
+        admin_id TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL
+      );
+    `);
+    const result = await pool.query('SELECT payload FROM techfix_state WHERE id = 1');
+    data = result.rows[0]?.payload ?? emptyData();
+    if (!result.rows[0]) await persist();
+    return;
+  }
   try {
     data = JSON.parse(await fs.readFile(dataFile, 'utf8'));
   } catch (error) {
@@ -28,6 +52,14 @@ async function loadData() {
 }
 
 async function persist() {
+  if (pool) {
+    await pool.query(
+      `INSERT INTO techfix_state (id, payload, updated_at) VALUES (1, $1::jsonb, NOW())
+       ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
+      [JSON.stringify(data)],
+    );
+    return;
+  }
   await fs.mkdir(path.dirname(dataFile), { recursive: true });
   const temporary = `${dataFile}.tmp`;
   await fs.writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
@@ -38,6 +70,37 @@ const id = () => crypto.randomUUID();
 const now = () => new Date().toISOString();
 const text = (value, max = 500) => (typeof value === 'string' ? value.trim().slice(0, max) : '');
 const publicAdmin = admin => (admin ? { id: admin.id, name: admin.name, email: admin.email } : null);
+const sessionHash = token => crypto.createHash('sha256').update(token).digest('hex');
+
+async function saveSession(token, adminId) {
+  if (pool) {
+    await pool.query(
+      `INSERT INTO techfix_sessions (token_hash, admin_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '8 hours')
+       ON CONFLICT (token_hash) DO UPDATE SET expires_at = EXCLUDED.expires_at`,
+      [sessionHash(token), adminId],
+    );
+    return;
+  }
+  if (!globalThis.__techfixSessions) globalThis.__techfixSessions = new Map();
+  globalThis.__techfixSessions.set(token, { adminId, expiresAt: Date.now() + sessionTtlMs });
+}
+
+async function getSession(token) {
+  if (pool) {
+    const result = await pool.query(
+      'SELECT admin_id, expires_at FROM techfix_sessions WHERE token_hash = $1 AND expires_at > NOW()',
+      [sessionHash(token)],
+    );
+    return result.rows[0] ? { adminId: result.rows[0].admin_id, expiresAt: new Date(result.rows[0].expires_at).getTime() } : null;
+  }
+  const session = globalThis.__techfixSessions?.get(token);
+  return session && session.expiresAt > Date.now() ? session : null;
+}
+
+async function deleteSession(token) {
+  if (pool) await pool.query('DELETE FROM techfix_sessions WHERE token_hash = $1', [sessionHash(token)]);
+  else globalThis.__techfixSessions?.delete(token);
+}
 
 function fail(res, status, message) {
   return res.status(status).json({ error: message });
@@ -104,16 +167,15 @@ function sessionCookie(token) {
   return `techfix_session=${token}; Path=/; Max-Age=${sessionTtlMs / 1000}; HttpOnly; SameSite=Strict${secure}`;
 }
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const token = req.headers.cookie?.match(/(?:^|; )techfix_session=([^;]+)/)?.[1];
-  const session = token && sessions.get(token);
+  const session = token && await getSession(token);
   if (!session || session.expiresAt <= Date.now()) {
-    if (token) sessions.delete(token);
+    if (token) await deleteSession(token);
     return fail(res, 401, 'Sessão inválida ou expirada.');
   }
   req.admin = data.admin?.id === session.adminId ? data.admin : null;
   if (!req.admin) return fail(res, 401, 'Sessão inválida ou expirada.');
-  session.expiresAt = Date.now() + sessionTtlMs;
   next();
 }
 
@@ -147,7 +209,7 @@ app.post('/api/auth/register', rateLimit, async (req, res) => {
   if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 12) return fail(res, 400, 'Nome, e-mail válido e senha com pelo menos 12 caracteres são obrigatórios.');
   data.admin = { id: 'main', name, email, passwordHash: hashPassword(password), createdAt: now() };
   const token = id();
-  sessions.set(token, { adminId: data.admin.id, expiresAt: Date.now() + sessionTtlMs });
+  await saveSession(token, data.admin.id);
   audit({ admin: data.admin }, 'create', 'admin', 'Acesso administrativo criado', 'Primeiro usuário administrativo cadastrado.');
   await persist();
   res.setHeader('Set-Cookie', sessionCookie(token));
@@ -158,7 +220,7 @@ app.post('/api/auth/login', rateLimit, async (req, res) => {
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
   if (!data.admin || data.admin.email !== email || !verifyPassword(password, data.admin.passwordHash)) return fail(res, 401, 'E-mail ou senha incorretos.');
   const token = id();
-  sessions.set(token, { adminId: data.admin.id, expiresAt: Date.now() + sessionTtlMs });
+  await saveSession(token, data.admin.id);
   audit({ admin: data.admin }, 'login', 'admin', 'Login realizado', 'Administrador entrou no painel.');
   await persist();
   res.setHeader('Set-Cookie', sessionCookie(token));
@@ -166,7 +228,7 @@ app.post('/api/auth/login', rateLimit, async (req, res) => {
 });
 app.post('/api/auth/logout', requireAuth, async (req, res) => {
   const token = req.headers.cookie?.match(/(?:^|; )techfix_session=([^;]+)/)?.[1];
-  if (token) sessions.delete(token);
+  if (token) await deleteSession(token);
   audit(req, 'logout', 'admin', 'Sessão encerrada', 'Administrador saiu do painel.');
   await persist();
   res.setHeader('Set-Cookie', 'techfix_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict');

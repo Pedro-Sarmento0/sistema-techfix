@@ -23,6 +23,6 @@ O servidor serve o build, exige sessão em cookie `HttpOnly`, aplica expiração
 
 ## Vercel
 
-Importe este repositório na Vercel. O arquivo `vercel.json` publica o build Vite e encaminha `/api/*` para a função em `api/index.mjs`. Configure `NODE_ENV=production` nas variáveis do projeto.
+Importe este repositório na Vercel. O arquivo `vercel.json` publica o build Vite e encaminha `/api/*` para a função em `api/index.mjs`. Configure `NODE_ENV=production` e `DATABASE_URL` nas variáveis do projeto.
 
-O armazenamento em `/tmp` da função é temporário e não serve para dados reais: para produção, substitua `data/techfix.json` por PostgreSQL/MySQL gerenciado e armazene as sessões no banco ou em Redis.
+Com `DATABASE_URL`, o sistema cria automaticamente as tabelas `techfix_state` e `techfix_sessions` na primeira inicialização. Credenciais, auditoria e sessões deixam de depender do arquivo temporário ou da memória da função.
