@@ -325,12 +325,20 @@ function App() {
         const status = await api.getAuthStatus();
         setHasAdmin(status.hasAdmin);
         if (status.hasAdmin) {
-          const saved = await api.getBootstrap<Client | Ticket>();
-          setAdmin(saved.admin);
-          setUsers(saved.users);
-          setClients(saved.clients as Client[]);
-          setTickets(saved.tickets as Ticket[]);
-          setAudit(sortAudit(saved.audit));
+          try {
+            const saved = await api.getBootstrap<Client | Ticket>();
+            setAdmin(saved.admin);
+            setUsers(saved.users);
+            setClients(saved.clients as Client[]);
+            setTickets(saved.tickets as Ticket[]);
+            setAudit(sortAudit(saved.audit));
+          } catch (error) {
+            if (error instanceof Error && error.message === 'Sessão inválida ou expirada.') {
+              setAdmin(null);
+            } else {
+              throw error;
+            }
+          }
         }
       } catch (error) {
         console.error(error);
