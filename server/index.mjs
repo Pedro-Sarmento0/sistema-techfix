@@ -17,9 +17,18 @@ const databaseUrl =
   process.env.tech_fix_POSTGRES_URL ||
   process.env.tech_fix_POSTGRES_URL_NON_POOLING;
 
-const pool = databaseUrl
+const postgresConnectionString = databaseUrl
+  ? (() => {
+      const url = new URL(databaseUrl);
+      url.searchParams.delete("sslmode");
+      url.searchParams.delete("uselibpqcompat");
+      return url.toString();
+    })()
+  : null;
+
+const pool = postgresConnectionString
   ? new pg.Pool({
-      connectionString: databaseUrl,
+      connectionString: postgresConnectionString,
       ssl: { rejectUnauthorized: false },
       max: 5,
       idleTimeoutMillis: 10000,
