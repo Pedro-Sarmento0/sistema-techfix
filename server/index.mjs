@@ -347,8 +347,14 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: '100kb' }));
 
-app.get('/api/bootstrap', requireAuth, (req, res) => {\n  res.setHeader('Cache-Control', 'no-store');\n  return res.json({ admin: publicUser(req.user), users: data.users.map(publicUser), clients: data.clients, tickets: data.tickets, audit: data.audit });\n});
-app.get('/api/auth/status', (req, res) => {\n  res.setHeader('Cache-Control', 'no-store');\n  return res.json({ hasAdmin: data.users.length > 0 });\n});
+app.get('/api/bootstrap', requireAuth, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json({ admin: publicUser(req.user), users: data.users.map(publicUser), clients: data.clients, tickets: data.tickets, audit: data.audit });
+});
+app.get('/api/auth/status', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json({ hasAdmin: data.users.length > 0 });
+});
 app.post('/api/auth/register', rateLimit, async (req, res) => {
   if (data.users.length) return fail(res, 409, 'O acesso inicial já foi criado. Entre para criar novos usuários.');
   const name = text(req.body?.name, 160);
