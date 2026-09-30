@@ -12,9 +12,10 @@ const port = Number(process.env.PORT || 3000);
 const isProduction = process.env.NODE_ENV === 'production' || process.argv.includes('--production');
 const sessionTtlMs = 8 * 60 * 60 * 1000;
 const attempts = new Map();
-const pool = process.env.DATABASE_URL
+const databaseUrl = process.env.DATABASE_URL || process.env.tech_fix_POSTGRES_URL;
+const pool = databaseUrl
   ? new pg.Pool({
-      connectionString: process.env.DATABASE_URL,
+      connectionString: databaseUrl,
       ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
     })
   : null;
