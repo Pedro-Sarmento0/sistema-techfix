@@ -12,11 +12,18 @@ const port = Number(process.env.PORT || 3000);
 const isProduction = process.env.NODE_ENV === 'production' || process.argv.includes('--production');
 const sessionTtlMs = 8 * 60 * 60 * 1000;
 const attempts = new Map();
-const databaseUrl = process.env.DATABASE_URL || process.env.tech_fix_POSTGRES_URL;
+const databaseUrl =
+  process.env.DATABASE_URL ||
+  process.env.tech_fix_POSTGRES_URL ||
+  process.env.tech_fix_POSTGRES_URL_NON_POOLING;
+
 const pool = databaseUrl
   ? new pg.Pool({
       connectionString: databaseUrl,
-      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+      ssl: { rejectUnauthorized: false },
+      max: 5,
+      idleTimeoutMillis: 10000,
+      connectionTimeoutMillis: 10000,
     })
   : null;
 let data;
