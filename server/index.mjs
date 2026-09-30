@@ -65,11 +65,73 @@ async function loadData() {
         expires_at TIMESTAMPTZ NOT NULL
       );
     `);
-    const result = await pool.query('SELECT payload FROM techfix_state WHERE id = 1');
-    data = normalizeData(result.rows[0]?.payload ?? emptyData());
-    if (!result.rows[0]) await persist();
+
+    const [usersResult, clientsResult, equipmentResult, ticketsResult, stateResult] = await Promise.all([
+      pool.query('SELECT id, name, email, password_hash, role, created_at FROM techfix_users ORDER BY created_at'),
+      pool.query('SELECT id, name, email, phone, address, plan, status, next_payment, contract_start, devices, notes, created_at, updated_at FROM techfix_clients ORDER BY created_at'),
+      pool.query('SELECT client_id, name, type, brand, model FROM techfix_equipment ORDER BY id'),
+      pool.query('SELECT id, client_id, device, type, issue, status, date, notes, created_at, updated_at FROM techfix_tickets ORDER BY created_at'),
+      pool.query('SELECT payload FROM techfix_state WHERE id = 1'),
+    ]);
+
+    const equipmentByClient = new Map();
+    for (const row of equipmentResult.rows) {
+      const list = equipmentByClient.get(row.client_id) ?? [];
+      list.push({ name: row.name, type: row.type, brand: row.brand, model: row.model });
+      equipmentByClient.set(row.client_id, list);
+    }
+
+    const clientById = new Map();
+    const clients = clientsResult.rows.map(row => {
+      const equipment = equipmentByClient.get(row.id) ?? [];
+      const client = {
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        phone: row.phone,
+        address: row.address,
+        plan: row.plan,
+        status: row.status,
+        nextPayment: row.next_payment,
+        contractStart: row.contract_start,
+        devices: equipment.length,
+        equipment,
+        notes: row.notes,
+        createdAt: new Date(row.created_at).toISOString(),
+        updatedAt: new Date(row.updated_at).toISOString(),
+      };
+      clientById.set(client.id, client);
+      return client;
+    });
+
+    data = normalizeData({
+      users: usersResult.rows.map(row => ({
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        passwordHash: row.password_hash,
+        role: row.role,
+        createdAt: new Date(row.created_at).toISOString(),
+      })),
+      clients,
+      tickets: ticketsResult.rows.map(row => ({
+        id: row.id,
+        clientId: row.client_id,
+        client: clientById.get(row.client_id)?.name ?? '',
+        device: row.device,
+        type: row.type,
+        issue: row.issue,
+        status: row.status,
+        date: row.date,
+        notes: row.notes,
+        createdAt: new Date(row.created_at).toISOString(),
+        updatedAt: new Date(row.updated_at).toISOString(),
+      })),
+      audit: stateResult.rows[0]?.payload?.audit ?? [],
+    });
     return;
   }
+
   try {
     data = JSON.parse(await fs.readFile(dataFile, 'utf8'));
   } catch (error) {
@@ -82,13 +144,70 @@ async function loadData() {
 
 async function persist() {
   if (pool) {
-    await pool.query(
-      `INSERT INTO techfix_state (id, payload, updated_at) VALUES (1, $1::jsonb, NOW())
-       ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
-      [JSON.stringify(data)],
-    );
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM techfix_tickets');
+      await client.query('DELETE FROM techfix_equipment');
+      await client.query('DELETE FROM techfix_clients');
+      await client.query('DELETE FROM techfix_users');
+
+      for (const user of data.users) {
+        await client.query(
+          `INSERT INTO techfix_users (id, name, email, password_hash, role, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [user.id, user.name, user.email, user.passwordHash, user.role, user.createdAt],
+        );
+      }
+
+      for (const saved of data.clients) {
+        await client.query(
+          `INSERT INTO techfix_clients
+             (id, name, email, phone, address, plan, status, next_payment, contract_start, devices, notes, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+          [
+            saved.id, saved.name, saved.email, saved.phone, saved.address, saved.plan, saved.status,
+            saved.nextPayment, saved.contractStart, saved.equipment.length, saved.notes, saved.createdAt, saved.updatedAt,
+          ],
+        );
+
+        for (const equipment of saved.equipment) {
+          await client.query(
+            `INSERT INTO techfix_equipment (client_id, name, type, brand, model)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [saved.id, equipment.name, equipment.type, equipment.brand, equipment.model],
+          );
+        }
+      }
+
+      for (const ticket of data.tickets) {
+        await client.query(
+          `INSERT INTO techfix_tickets
+             (id, client_id, device, type, issue, status, date, notes, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          [
+            ticket.id, ticket.clientId, ticket.device, ticket.type, ticket.issue, ticket.status,
+            ticket.date, ticket.notes, ticket.createdAt, ticket.updatedAt,
+          ],
+        );
+      }
+
+      await client.query(
+        `INSERT INTO techfix_state (id, payload, updated_at) VALUES (1, $1::jsonb, NOW())
+         ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
+        [JSON.stringify({ audit: data.audit })],
+      );
+
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
     return;
   }
+
   await fs.mkdir(path.dirname(dataFile), { recursive: true });
   const temporary = `${dataFile}.tmp`;
   await fs.writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
