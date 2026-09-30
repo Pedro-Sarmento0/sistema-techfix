@@ -312,7 +312,7 @@ function rateLimit(req, res, next) {
 
 function sessionCookie(token) {
   const secure = isProduction ? '; Secure' : '';
-  return `techfix_session=${token}; Path=/; Max-Age=${sessionTtlMs / 1000}; HttpOnly; SameSite=Strict${secure}`;
+  return `techfix_session=${token}; Path=/; Max-Age=${sessionTtlMs / 1000}; HttpOnly; SameSite=Lax${secure}`;
 }
 
 async function requireAuth(req, res, next) {
@@ -347,8 +347,8 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: '100kb' }));
 
-app.get('/api/bootstrap', requireAuth, (req, res) => res.json({ admin: publicUser(req.user), users: data.users.map(publicUser), clients: data.clients, tickets: data.tickets, audit: data.audit }));
-app.get('/api/auth/status', (req, res) => res.json({ hasAdmin: data.users.length > 0 }));
+app.get('/api/bootstrap', requireAuth, (req, res) => {\n  res.setHeader('Cache-Control', 'no-store');\n  return res.json({ admin: publicUser(req.user), users: data.users.map(publicUser), clients: data.clients, tickets: data.tickets, audit: data.audit });\n});
+app.get('/api/auth/status', (req, res) => {\n  res.setHeader('Cache-Control', 'no-store');\n  return res.json({ hasAdmin: data.users.length > 0 });\n});
 app.post('/api/auth/register', rateLimit, async (req, res) => {
   if (data.users.length) return fail(res, 409, 'O acesso inicial já foi criado. Entre para criar novos usuários.');
   const name = text(req.body?.name, 160);
@@ -381,7 +381,7 @@ app.post('/api/auth/logout', requireAuth, async (req, res) => {
   if (token) await deleteSession(token);
   audit(req, 'logout', 'admin', 'Sessão encerrada', 'Administrador saiu do painel.');
   await persist();
-  res.setHeader('Set-Cookie', 'techfix_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict');
+  res.setHeader('Set-Cookie', 'techfix_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax');
   res.status(204).end();
 });
 
