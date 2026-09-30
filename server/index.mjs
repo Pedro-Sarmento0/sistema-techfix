@@ -12,10 +12,13 @@ const port = Number(process.env.PORT || 3000);
 const isProduction = process.env.NODE_ENV === 'production' || process.argv.includes('--production');
 const sessionTtlMs = 8 * 60 * 60 * 1000;
 const attempts = new Map();
-const databaseUrl =
-  process.env.DATABASE_URL ||
-  process.env.tech_fix_POSTGRES_URL ||
-  process.env.tech_fix_POSTGRES_URL_NON_POOLING;
+// Production must use the explicitly configured database connection.
+// Do not silently fall back to a Vercel-managed Postgres resource, because
+// the application is intended to persist data in the Techfix Supabase project.
+const databaseUrl = process.env.DATABASE_URL || null;
+if (isProduction && !databaseUrl) {
+  throw new Error('DATABASE_URL não configurada. Configure a conexão PostgreSQL do projeto Supabase Techfix na Vercel.');
+}
 
 const postgresConnectionString = databaseUrl
   ? (() => {
