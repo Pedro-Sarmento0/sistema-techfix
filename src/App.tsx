@@ -315,8 +315,7 @@ function App() {
     async function boot() {
       try {
         const status = await api.getAuthStatus();
-        setHasAdmin(status.hasAdmin);
-        if (status.hasAdmin) {
+        if (status.authenticated) {
           const saved = await api.getBootstrap<Client | Ticket>();
           setAdmin(saved.admin);
           setUsers(saved.users);
