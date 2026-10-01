@@ -45,8 +45,13 @@ const emptyData = () => ({ users: [], clients: [], tickets: [], audit: [] });
 function normalizeData(value) {
   const normalized = { ...emptyData(), ...value };
   if (!normalized.users.length && normalized.admin) {
-    normalized.users = [{ ...normalized.admin, role: 'admin' }];
+    normalized.users = [{ ...normalized.admin, role: 'admin', accountId: normalized.admin.id }];
   }
+  const legacyAccountId = normalized.users[0]?.accountId || normalized.users[0]?.id;
+  normalized.users = normalized.users.map(user => ({ ...user, accountId: user.accountId || legacyAccountId || user.id }));
+  normalized.clients = normalized.clients.map(client => ({ ...client, accountId: client.accountId || legacyAccountId }));
+  normalized.tickets = normalized.tickets.map(ticket => ({ ...ticket, accountId: ticket.accountId || legacyAccountId }));
+  normalized.audit = normalized.audit.map(entry => ({ ...entry, accountId: entry.accountId || legacyAccountId }));
   delete normalized.admin;
   return normalized;
 }
@@ -64,13 +69,28 @@ async function loadData() {
         admin_id TEXT NOT NULL,
         expires_at TIMESTAMPTZ NOT NULL
       );
+      ALTER TABLE techfix_users ADD COLUMN IF NOT EXISTS account_id TEXT;
+      ALTER TABLE techfix_clients ADD COLUMN IF NOT EXISTS account_id TEXT;
+      ALTER TABLE techfix_tickets ADD COLUMN IF NOT EXISTS account_id TEXT;
+      UPDATE techfix_users
+        SET account_id = (SELECT id FROM techfix_users ORDER BY created_at LIMIT 1)
+        WHERE account_id IS NULL;
+      UPDATE techfix_clients
+        SET account_id = (SELECT account_id FROM techfix_users ORDER BY created_at LIMIT 1)
+        WHERE account_id IS NULL;
+      UPDATE techfix_tickets
+        SET account_id = (SELECT account_id FROM techfix_users ORDER BY created_at LIMIT 1)
+        WHERE account_id IS NULL;
+      CREATE INDEX IF NOT EXISTS techfix_users_account_idx ON techfix_users (account_id);
+      CREATE INDEX IF NOT EXISTS techfix_clients_account_idx ON techfix_clients (account_id);
+      CREATE INDEX IF NOT EXISTS techfix_tickets_account_idx ON techfix_tickets (account_id);
     `);
 
     const [usersResult, clientsResult, equipmentResult, ticketsResult, stateResult] = await Promise.all([
-      pool.query('SELECT id, name, email, password_hash, role, created_at FROM techfix_users ORDER BY created_at'),
-      pool.query('SELECT id, name, email, phone, address, plan, status, next_payment, contract_start, devices, notes, created_at, updated_at FROM techfix_clients ORDER BY created_at'),
+      pool.query('SELECT id, account_id, name, email, password_hash, role, created_at FROM techfix_users ORDER BY created_at'),
+      pool.query('SELECT id, account_id, name, email, phone, address, plan, status, next_payment, contract_start, devices, notes, created_at, updated_at FROM techfix_clients ORDER BY created_at'),
       pool.query('SELECT client_id, name, type, brand, model FROM techfix_equipment ORDER BY id'),
-      pool.query('SELECT id, client_id, device, type, issue, status, date, notes, created_at, updated_at FROM techfix_tickets ORDER BY created_at'),
+      pool.query('SELECT id, account_id, client_id, device, type, issue, status, date, notes, created_at, updated_at FROM techfix_tickets ORDER BY created_at'),
       pool.query('SELECT payload FROM techfix_state WHERE id = 1'),
     ]);
 
@@ -86,6 +106,7 @@ async function loadData() {
       const equipment = equipmentByClient.get(row.id) ?? [];
       const client = {
         id: row.id,
+        accountId: row.account_id,
         name: row.name,
         email: row.email,
         phone: row.phone,
@@ -107,6 +128,7 @@ async function loadData() {
     data = normalizeData({
       users: usersResult.rows.map(row => ({
         id: row.id,
+        accountId: row.account_id || row.id,
         name: row.name,
         email: row.email,
         passwordHash: row.password_hash,
@@ -116,6 +138,7 @@ async function loadData() {
       clients,
       tickets: ticketsResult.rows.map(row => ({
         id: row.id,
+        accountId: row.account_id,
         clientId: row.client_id,
         client: clientById.get(row.client_id)?.name ?? '',
         device: row.device,
@@ -142,31 +165,31 @@ async function loadData() {
   data = normalizeData(data);
 }
 
-async function persist() {
+async function persist(accountId) {
   if (pool) {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('DELETE FROM techfix_tickets');
-      await client.query('DELETE FROM techfix_equipment');
-      await client.query('DELETE FROM techfix_clients');
-      await client.query('DELETE FROM techfix_users');
+      await client.query('DELETE FROM techfix_tickets WHERE account_id = $1', [accountId]);
+      await client.query('DELETE FROM techfix_equipment WHERE client_id IN (SELECT id FROM techfix_clients WHERE account_id = $1)', [accountId]);
+      await client.query('DELETE FROM techfix_clients WHERE account_id = $1', [accountId]);
+      await client.query('DELETE FROM techfix_users WHERE account_id = $1', [accountId]);
 
-      for (const user of data.users) {
+      for (const user of data.users.filter(item => item.accountId === accountId)) {
         await client.query(
-          `INSERT INTO techfix_users (id, name, email, password_hash, role, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [user.id, user.name, user.email, user.passwordHash, user.role, user.createdAt],
+          `INSERT INTO techfix_users (id, account_id, name, email, password_hash, role, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [user.id, accountId, user.name, user.email, user.passwordHash, user.role, user.createdAt],
         );
       }
 
-      for (const saved of data.clients) {
+      for (const saved of data.clients.filter(item => item.accountId === accountId)) {
         await client.query(
           `INSERT INTO techfix_clients
-             (id, name, email, phone, address, plan, status, next_payment, contract_start, devices, notes, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+             (id, account_id, name, email, phone, address, plan, status, next_payment, contract_start, devices, notes, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
           [
-            saved.id, saved.name, saved.email, saved.phone, saved.address, saved.plan, saved.status,
+            saved.id, accountId, saved.name, saved.email, saved.phone, saved.address, saved.plan, saved.status,
             saved.nextPayment, saved.contractStart, saved.equipment.length, saved.notes, saved.createdAt, saved.updatedAt,
           ],
         );
@@ -180,22 +203,26 @@ async function persist() {
         }
       }
 
-      for (const ticket of data.tickets) {
+      for (const ticket of data.tickets.filter(item => item.accountId === accountId)) {
         await client.query(
           `INSERT INTO techfix_tickets
-             (id, client_id, device, type, issue, status, date, notes, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+             (id, account_id, client_id, device, type, issue, status, date, notes, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
           [
-            ticket.id, ticket.clientId, ticket.device, ticket.type, ticket.issue, ticket.status,
+            ticket.id, accountId, ticket.clientId, ticket.device, ticket.type, ticket.issue, ticket.status,
             ticket.date, ticket.notes, ticket.createdAt, ticket.updatedAt,
           ],
         );
       }
 
+      const currentState = await client.query('SELECT payload FROM techfix_state WHERE id = 1 FOR UPDATE');
+      const existingAudit = currentState.rows[0]?.payload?.audit ?? [];
+      const scopedAudit = data.audit.filter(entry => entry.accountId === accountId);
+      const otherAudit = existingAudit.filter(entry => entry.accountId !== accountId);
       await client.query(
         `INSERT INTO techfix_state (id, payload, updated_at) VALUES (1, $1::jsonb, NOW())
          ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
-        [JSON.stringify({ audit: data.audit })],
+        [JSON.stringify({ audit: [...scopedAudit, ...otherAudit] })],
       );
 
       await client.query('COMMIT');
@@ -272,12 +299,12 @@ function clientPayload(value) {
   };
 }
 
-function ticketPayload(value) {
+function ticketPayload(value, accountId) {
   if (!value || typeof value !== 'object') return null;
   const type = value.type === 'Remoto' ? 'Remoto' : value.type === 'Presencial' ? 'Presencial' : null;
   const statuses = ['Agendado', 'Em atendimento', 'Aguardando peça', 'Concluído', 'Cancelado'];
   if (!type || !statuses.includes(value.status) || !text(value.clientId, 80) || !text(value.issue, 2000)) return null;
-  const client = data.clients.find(item => item.id === value.clientId);
+  const client = data.clients.find(item => item.id === value.clientId && item.accountId === accountId);
   if (!client) return null;
   return {
     id: text(value.id, 80) || `#${String(Date.now()).slice(-5)}`, clientId: client.id, client: client.name, device: text(value.device, 120), type,
@@ -328,7 +355,7 @@ async function requireAuth(req, res, next) {
 }
 
 function audit(req, action, entity, title, description, snapshot) {
-  const entry = { id: id(), entity, action, title, description, actor: req.user.name, createdAt: now() };
+  const entry = { id: id(), accountId: req.user.accountId, entity, action, title, description, actor: req.user.name, createdAt: now() };
   if (snapshot !== undefined) entry.snapshot = snapshot;
   data.audit.unshift(entry);
   return entry;
@@ -347,20 +374,35 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: '100kb' }));
 
-app.get('/api/bootstrap', requireAuth, (req, res) => res.json({ admin: publicUser(req.user), users: data.users.map(publicUser), clients: data.clients, tickets: data.tickets, audit: data.audit }));
-app.get('/api/auth/status', (req, res) => res.json({ hasAdmin: data.users.length > 0 }));
+app.get('/api/bootstrap', requireAuth, (req, res) => {
+  const accountId = req.user.accountId;
+  res.json({
+    admin: publicUser(req.user),
+    users: data.users.filter(user => user.accountId === accountId).map(publicUser),
+    clients: data.clients.filter(client => client.accountId === accountId),
+    tickets: data.tickets.filter(ticket => ticket.accountId === accountId),
+    audit: data.audit.filter(entry => entry.accountId === accountId),
+  });
+});
+app.get('/api/auth/status', async (req, res) => {
+  const token = req.headers.cookie?.match(/(?:^|; )techfix_session=([^;]+)/)?.[1];
+  const session = token && await getSession(token);
+  const user = session && data.users.find(item => item.id === session.adminId);
+  res.json({ authenticated: Boolean(user && session.expiresAt > Date.now()) });
+});
 app.post('/api/auth/register', rateLimit, async (req, res) => {
-  if (data.users.length) return fail(res, 409, 'O acesso inicial já foi criado. Entre para criar novos usuários.');
   const name = text(req.body?.name, 160);
   const email = text(req.body?.email, 240).toLowerCase();
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
   if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 12) return fail(res, 400, 'Nome, e-mail válido e senha com pelo menos 12 caracteres são obrigatórios.');
-  const user = { id: id(), name, email, passwordHash: hashPassword(password), role: 'admin', createdAt: now() };
+  if (data.users.some(user => user.email === email)) return fail(res, 409, 'Este e-mail já está cadastrado.');
+  const userId = id();
+  const user = { id: userId, accountId: userId, name, email, passwordHash: hashPassword(password), role: 'admin', createdAt: now() };
   data.users.push(user);
   const token = id();
   await saveSession(token, user.id);
   audit({ user }, 'create', 'admin', 'Acesso administrativo criado', 'Primeiro usuário administrativo cadastrado.');
-  await persist();
+  await persist(user.accountId);
   res.setHeader('Set-Cookie', sessionCookie(token));
   res.status(201).json({ admin: publicUser(user) });
 });
@@ -372,7 +414,7 @@ app.post('/api/auth/login', rateLimit, async (req, res) => {
   const token = id();
   await saveSession(token, user.id);
   audit({ user }, 'login', 'admin', 'Login realizado', 'Usuário entrou no painel.');
-  await persist();
+  await persist(user.accountId);
   res.setHeader('Set-Cookie', sessionCookie(token));
   res.json({ admin: publicUser(user) });
 });
@@ -380,7 +422,7 @@ app.post('/api/auth/logout', requireAuth, async (req, res) => {
   const token = req.headers.cookie?.match(/(?:^|; )techfix_session=([^;]+)/)?.[1];
   if (token) await deleteSession(token);
   audit(req, 'logout', 'admin', 'Sessão encerrada', 'Administrador saiu do painel.');
-  await persist();
+  await persist(req.user.accountId);
   res.setHeader('Set-Cookie', 'techfix_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict');
   res.status(204).end();
 });
@@ -393,55 +435,65 @@ app.post('/api/users', requireAuth, async (req, res) => {
   const role = req.body?.role === 'admin' ? 'admin' : 'operator';
   if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 12) return fail(res, 400, 'Nome, e-mail válido e senha com pelo menos 12 caracteres são obrigatórios.');
   if (data.users.some(user => user.email === email)) return fail(res, 409, 'Este e-mail já está cadastrado.');
-  const user = { id: id(), name, email, passwordHash: hashPassword(password), role, createdAt: now() };
+  const user = { id: id(), accountId: req.user.accountId, name, email, passwordHash: hashPassword(password), role, createdAt: now() };
   data.users.push(user);
   const entry = audit(req, 'create', 'admin', user.name, `Usuário ${role === 'admin' ? 'administrador' : 'operador'} criado.`, { id: user.id, name, email, role });
-  await persist();
+  await persist(req.user.accountId);
   res.status(201).json({ user: publicUser(user), audit: entry });
 });
 
 app.put('/api/clients/:id', requireAuth, async (req, res) => {
   const saved = clientPayload({ ...req.body, id: req.params.id });
   if (!saved) return fail(res, 400, 'Dados do cliente inválidos.');
-  const index = data.clients.findIndex(item => item.id === saved.id);
+  const index = data.clients.findIndex(item => item.id === saved.id && item.accountId === req.user.accountId);
+  if (data.clients.some(item => item.id === saved.id) && index < 0) return fail(res, 404, 'Cliente não encontrado.');
+  saved.accountId = req.user.accountId;
   const exists = index >= 0;
   if (exists) saved.createdAt = data.clients[index].createdAt;
   if (exists) data.clients[index] = saved; else data.clients.push(saved);
   const entry = audit(req, exists ? 'update' : 'create', 'client', saved.name, exists ? 'Cadastro do cliente atualizado.' : 'Novo cliente cadastrado.', saved);
-  await persist();
+  await persist(req.user.accountId);
   res.json({ record: saved, audit: entry });
 });
 app.delete('/api/clients/:id', requireAuth, async (req, res) => {
-  const index = data.clients.findIndex(item => item.id === req.params.id);
+  const index = data.clients.findIndex(item => item.id === req.params.id && item.accountId === req.user.accountId);
   if (index < 0) return fail(res, 404, 'Cliente não encontrado.');
   const [removed] = data.clients.splice(index, 1);
   const entry = audit(req, 'delete', 'client', removed.name, 'Cliente removido da carteira.', removed);
-  await persist();
+  await persist(req.user.accountId);
   res.json({ audit: entry });
 });
 app.put('/api/tickets/:id', requireAuth, async (req, res) => {
-  const saved = ticketPayload({ ...req.body, id: req.params.id });
+  const saved = ticketPayload({ ...req.body, id: req.params.id }, req.user.accountId);
   if (!saved) return fail(res, 400, 'Dados do atendimento inválidos.');
-  const index = data.tickets.findIndex(item => item.id === saved.id);
+  const index = data.tickets.findIndex(item => item.id === saved.id && item.accountId === req.user.accountId);
+  if (data.tickets.some(item => item.id === saved.id) && index < 0) return fail(res, 404, 'Atendimento não encontrado.');
+  saved.accountId = req.user.accountId;
   const exists = index >= 0;
   if (exists) saved.createdAt = data.tickets[index].createdAt;
   if (exists) data.tickets[index] = saved; else data.tickets.push(saved);
   const entry = audit(req, exists ? 'update' : 'create', 'ticket', saved.id, exists ? `Atendimento de ${saved.client} atualizado.` : `Atendimento aberto para ${saved.client}.`, saved);
-  await persist();
+  await persist(req.user.accountId);
   res.json({ record: saved, audit: entry });
 });
 app.delete('/api/tickets/:id', requireAuth, async (req, res) => {
-  const index = data.tickets.findIndex(item => item.id === req.params.id);
+  const index = data.tickets.findIndex(item => item.id === req.params.id && item.accountId === req.user.accountId);
   if (index < 0) return fail(res, 404, 'Atendimento não encontrado.');
   const [removed] = data.tickets.splice(index, 1);
   const entry = audit(req, 'delete', 'ticket', removed.id, `Atendimento de ${removed.client} removido.`, removed);
-  await persist();
+  await persist(req.user.accountId);
   res.json({ audit: entry });
 });
 app.get('/api/backup', requireAuth, async (req, res) => {
   audit(req, 'backup', 'system', 'Backup exportado', 'Arquivo JSON gerado com clientes, atendimentos e histórico.');
-  await persist();
-  res.json({ exportedAt: now(), admin: publicUser(req.user), clients: data.clients, tickets: data.tickets, audit: data.audit });
+  await persist(req.user.accountId);
+  res.json({
+    exportedAt: now(),
+    admin: publicUser(req.user),
+    clients: data.clients.filter(client => client.accountId === req.user.accountId),
+    tickets: data.tickets.filter(ticket => ticket.accountId === req.user.accountId),
+    audit: data.audit.filter(entry => entry.accountId === req.user.accountId),
+  });
 });
 
 if (isProduction) {

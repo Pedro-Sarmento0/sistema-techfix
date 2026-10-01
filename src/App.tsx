@@ -224,8 +224,9 @@ function Splash() {
   );
 }
 
-function Login({ hasAdmin, onLogin }: { hasAdmin: boolean; onLogin: (value: { name: string; email: string; password: string }, isNew: boolean) => Promise<void> }) {
+function Login({ onLogin }: { onLogin: (value: { name: string; email: string; password: string }, isNew: boolean) => Promise<void> }) {
   const [form, setForm] = useState({ name: '', email: '', password: '' });
+  const [isNew, setIsNew] = useState(false);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   async function submit(event: FormEvent) {
@@ -235,25 +236,14 @@ function Login({ hasAdmin, onLogin }: { hasAdmin: boolean; onLogin: (value: { na
     if (!form.email.includes('@')) return setError('Informe um e-mail válido.');
     if (form.password.length < 12) return setError('A senha precisa ter pelo menos 12 caracteres.');
 
-    if (hasAdmin) {
-      setSaving(true);
-      try {
-        await onLogin(form, false);
-      } catch (error) {
-        setSaving(false);
-        setError(error instanceof Error ? error.message : 'Não foi possível entrar.');
-      }
-      return;
-    }
-
-    if (!form.name.trim()) return setError('Informe seu nome.');
+    if (isNew && !form.name.trim()) return setError('Informe seu nome.');
 
     setSaving(true);
     try {
-      await onLogin(form, true);
+      await onLogin(form, isNew);
     } catch (error) {
       setSaving(false);
-      setError(error instanceof Error ? error.message : 'Não foi possível criar o acesso.');
+      setError(error instanceof Error ? error.message : isNew ? 'Não foi possível criar a conta.' : 'Não foi possível entrar.');
     }
   }
 
@@ -272,10 +262,10 @@ function Login({ hasAdmin, onLogin }: { hasAdmin: boolean; onLogin: (value: { na
       <section className="login-panel">
         <div className="login-box">
           <span className="mobile-brand">TECHFIX</span>
-          <h2>{hasAdmin ? 'Entrar no painel' : 'Criar acesso administrativo'}</h2>
-          <p>{hasAdmin ? 'Use suas credenciais para continuar.' : 'Cadastre o primeiro acesso. A partir daqui tudo fica salvo no banco local.'}</p>
+          <h2>{isNew ? 'Criar sua conta' : 'Entrar no painel'}</h2>
+          <p>{isNew ? 'Seus clientes ficam separados dos dados de outras contas.' : 'Entre para acessar seus clientes e atendimentos.'}</p>
           <form onSubmit={submit}>
-            {!hasAdmin && (
+            {isNew && (
               <label>
                 Nome completo
                 <input required value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} placeholder="Seu nome" />
@@ -296,11 +286,14 @@ function Login({ hasAdmin, onLogin }: { hasAdmin: boolean; onLogin: (value: { na
               </div>
             )}
             <button className="primary full" disabled={saving}>
-              {saving ? 'Acessando...' : hasAdmin ? 'Acessar painel' : 'Criar e acessar'}
+              {saving ? (isNew ? 'Criando conta...' : 'Acessando...') : isNew ? 'Criar conta' : 'Acessar painel'}
               <ArrowRight size={17} />
             </button>
           </form>
-          <small>Os dados ficam protegidos no servidor e aparecem no histórico.</small>
+          <button className="login-switch" type="button" onClick={() => { setIsNew(!isNew); setError(''); }}>
+            {isNew ? 'Já tem uma conta? Entrar' : 'Ainda não tem conta? Criar conta'}
+          </button>
+          <small>Os dados da conta são protegidos e acessíveis somente após autenticação.</small>
         </div>
       </section>
     </main>
@@ -311,7 +304,6 @@ function App() {
   const [booting, setBooting] = useState(true);
   const [bootError, setBootError] = useState('');
   const [admin, setAdmin] = useState<Admin | null>(null);
-  const [hasAdmin, setHasAdmin] = useState(false);
   const [users, setUsers] = useState<Admin[]>([]);
   const [page, setPage] = useState<Page>('dashboard');
   const [clients, setClients] = useState<Client[]>([]);
@@ -323,8 +315,7 @@ function App() {
     async function boot() {
       try {
         const status = await api.getAuthStatus();
-        setHasAdmin(status.hasAdmin);
-        if (status.hasAdmin) {
+        if (status.authenticated) {
           const saved = await api.getBootstrap<Client | Ticket>();
           setAdmin(saved.admin);
           setUsers(saved.users);
@@ -346,7 +337,6 @@ function App() {
   async function handleLogin(value: { name: string; email: string; password: string }, isNew: boolean) {
     const result = isNew ? await api.register(value.name, value.email, value.password) : await api.login(value.email, value.password);
     setAdmin(result.admin);
-    setHasAdmin(true);
     const saved = await api.getBootstrap<Client | Ticket>();
     setUsers(saved.users);
     setClients(saved.clients as Client[]);
@@ -451,7 +441,7 @@ function App() {
     );
   }
 
-  if (!admin) return <Login hasAdmin={hasAdmin} onLogin={handleLogin} />;
+  if (!admin) return <Login onLogin={handleLogin} />;
 
   const nav: [Page, LucideIcon, string][] = [
     ['dashboard', LayoutDashboard, 'Dashboard'],

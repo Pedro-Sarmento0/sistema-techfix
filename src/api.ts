@@ -22,7 +22,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export function getAuthStatus() {
-  return request<{ hasAdmin: boolean }>('/api/auth/status');
+  return request<{ authenticated: boolean }>('/api/auth/status');
 }
 
 export function getBootstrap<T>() {
