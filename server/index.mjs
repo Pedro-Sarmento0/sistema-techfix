@@ -339,7 +339,7 @@ function rateLimit(req, res, next) {
 
 function sessionCookie(token) {
   const secure = isProduction ? '; Secure' : '';
-  return `techfix_session=${token}; Path=/; Max-Age=${sessionTtlMs / 1000}; HttpOnly; SameSite=Strict${secure}`;
+  return `techfix_session=${token}; Path=/; Max-Age=${sessionTtlMs / 1000}; HttpOnly; SameSite=Lax${secure}`;
 }
 
 async function requireAuth(req, res, next) {
@@ -374,22 +374,8 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: '100kb' }));
 
-app.get('/api/bootstrap', requireAuth, (req, res) => {
-  const accountId = req.user.accountId;
-  res.json({
-    admin: publicUser(req.user),
-    users: data.users.filter(user => user.accountId === accountId).map(publicUser),
-    clients: data.clients.filter(client => client.accountId === accountId),
-    tickets: data.tickets.filter(ticket => ticket.accountId === accountId),
-    audit: data.audit.filter(entry => entry.accountId === accountId),
-  });
-});
-app.get('/api/auth/status', async (req, res) => {
-  const token = req.headers.cookie?.match(/(?:^|; )techfix_session=([^;]+)/)?.[1];
-  const session = token && await getSession(token);
-  const user = session && data.users.find(item => item.id === session.adminId);
-  res.json({ authenticated: Boolean(user && session.expiresAt > Date.now()) });
-});
+app.get('/api/bootstrap', requireAuth, (req, res) => res.json({ admin: publicUser(req.user), users: data.users.map(publicUser), clients: data.clients, tickets: data.tickets, audit: data.audit }));
+app.get('/api/auth/status', (req, res) => res.json({ hasAdmin: data.users.length > 0 }));
 app.post('/api/auth/register', rateLimit, async (req, res) => {
   const name = text(req.body?.name, 160);
   const email = text(req.body?.email, 240).toLowerCase();
@@ -422,7 +408,7 @@ app.post('/api/auth/logout', requireAuth, async (req, res) => {
   const token = req.headers.cookie?.match(/(?:^|; )techfix_session=([^;]+)/)?.[1];
   if (token) await deleteSession(token);
   audit(req, 'logout', 'admin', 'Sessão encerrada', 'Administrador saiu do painel.');
-  await persist(req.user.accountId);
+  await persist();
   res.setHeader('Set-Cookie', 'techfix_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict');
   res.status(204).end();
 });
