@@ -32,7 +32,7 @@ const postgresConnectionString = databaseUrl
 const pool = postgresConnectionString
   ? new pg.Pool({
       connectionString: postgresConnectionString,
-      ssl: { rejectUnauthorized: false },
+      ssl: { rejectUnauthorized: true },
       max: 5,
       idleTimeoutMillis: 10000,
       connectionTimeoutMillis: 10000,
