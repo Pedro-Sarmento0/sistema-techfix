@@ -1,7 +1,34 @@
+# Dependências e builds
 node_modules/
 dist/
 *.tsbuildinfo
+
+# Segredos e variáveis de ambiente
 .env
-.env.local
+.env.*
+!.env.example
+
+# Dados locais, logs e dumps
 data/
 data-*.json
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.sql
+*.dump
+*.bak
+*.backup
+
+# Credenciais/chaves/certificados locais
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Configuração local de ferramentas
+.vercel/
+.DS_Store
+Thumbs.db
